@@ -365,13 +365,13 @@ class AutomatedChannelManager:
                 self.post_daily_update(current_topic)
                 topic_index = (topic_index + 1) % len(topics)
             
-            # Post every minute for testing
-            schedule.every(1).minutes.do(post_with_rotating_topic)
-            logger.info(f"Scheduled posts every minute with rotating topics")
+            # Post every 4 hours
+            schedule.every(4).hours.do(post_with_rotating_topic)
+            logger.info(f"Scheduled posts every 4 hours with rotating topics")
         else:
-            # Random topics every minute
-            schedule.every(1).minutes.do(self.post_daily_update)
-            logger.info(f"Scheduled posts every minute with random topics")
+            # Random topics every 4 hours
+            schedule.every(4).hours.do(self.post_daily_update)
+            logger.info(f"Scheduled posts every 4 hours with random topics")
     
     def run_scheduler(self):
         """Run the scheduler loop."""
@@ -417,7 +417,7 @@ def main():
         test_message = telegram.send_text_message("This is a test message from our English learning bot.")
         print(f"Telegram API test result: {'Success' if test_message else 'Failed'}")
     
-    # Schedule posts every minute with English learning topics
+    # English learning topics
     english_topics = [
         # A1 Grammar Topics
         "To be verb A1 level",
@@ -459,8 +459,8 @@ def main():
         "Quiz"
     ]
     
-    # Post every minute for testing
-    schedule.every(1).minutes.do(lambda: manager.post_daily_update(random.choice(english_topics)))
+    # Schedule posts using the method in AutomatedChannelManager
+    manager.schedule_daily_posts(topics=english_topics)
     
     # Run the scheduler
     manager.run_scheduler()
