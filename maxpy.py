@@ -4,6 +4,8 @@ import time
 import logging
 import schedule
 import random
+import os
+import hashlib
 from datetime import datetime
 from typing import Optional, Dict, Any, List
 
@@ -13,6 +15,154 @@ logging.basicConfig(
     level=logging.INFO
 )
 logger = logging.getLogger(__name__)
+
+class PostMemory:
+    """Class to store and track previously posted content to avoid repetition."""
+    
+    def __init__(self, memory_file="post_history_max.json"):
+        """Initialize with a file to store post history."""
+        self.memory_file = memory_file
+        self.post_history = self._load_history()
+        
+    def _load_history(self):
+        """Load post history from file or create if it doesn't exist."""
+        if os.path.exists(self.memory_file):
+            try:
+                with open(self.memory_file, 'r', encoding='utf-8') as f:
+                    history = json.load(f)
+                    # Add topic_content if it doesn't exist in older files
+                    if "topic_content" not in history:
+                        history["topic_content"] = {}
+                    return history
+            except Exception as e:
+                logger.error(f"Error loading post history: {e}")
+                return {
+                    "topics": {},
+                    "content_hashes": [],
+                    "quiz_topics": [],
+                    "detailed_posts": [],
+                    "topic_content": {}  # New: Track specific content per topic
+                }
+        else:
+            return {
+                "topics": {},
+                "content_hashes": [],
+                "quiz_topics": [],
+                "detailed_posts": [],
+                "topic_content": {}  # New: Track specific content per topic
+            }
+            
+    def _save_history(self):
+        """Save post history to file."""
+        try:
+            with open(self.memory_file, 'w', encoding='utf-8') as f:
+                json.dump(self.post_history, f, indent=2)
+        except Exception as e:
+            logger.error(f"Error saving post history: {e}")
+    
+    def _extract_key_points(self, content: str) -> List[str]:
+        """Extract key points or concepts from the content."""
+        # Split content into sentences and clean them
+        sentences = content.replace('<b>', '').replace('</b>', '')\
+                         .replace('<i>', '').replace('</i>', '')\
+                         .replace('\n', ' ').split('.')
+        
+        # Extract key points (sentences with important markers)
+        key_points = []
+        for sentence in sentences:
+            sentence = sentence.strip()
+            # Look for sentences that are likely key points
+            if any(marker in sentence.lower() for marker in 
+                  ['important', 'key', 'remember', 'note', 'tip', 'example',
+                   'common mistake', 'correct way', 'incorrect', 'correct']):
+                key_points.append(sentence)
+            # Also include shorter, focused sentences
+            elif 10 < len(sentence.split()) < 20:
+                key_points.append(sentence)
+                
+        return key_points
+
+    def is_content_similar(self, topic: str, new_content: str) -> bool:
+        """Check if the new content is too similar to previously posted content for this topic."""
+        if topic not in self.post_history["topic_content"]:
+            return False
+            
+        new_key_points = set(self._extract_key_points(new_content))
+        if not new_key_points:  # If no key points extracted, fall back to content hash
+            return False
+            
+        # Check similarity with previous content
+        for previous_points in self.post_history["topic_content"][topic]:
+            previous_points_set = set(previous_points)
+            # Calculate similarity using Jaccard similarity
+            intersection = len(new_key_points.intersection(previous_points_set))
+            union = len(new_key_points.union(previous_points_set))
+            if union > 0 and intersection / union > 0.3:  # If more than 30% similar
+                logger.warning(f"Content for topic '{topic}' is too similar to previous post")
+                return True
+                
+        return False
+    
+    def record_post(self, topic: str, content: str):
+        """Record a post to memory."""
+        # Record topic usage
+        if topic in self.post_history["topics"]:
+            self.post_history["topics"][topic]["count"] += 1
+            self.post_history["topics"][topic]["last_used"] = datetime.now().isoformat()
+        else:
+            self.post_history["topics"][topic] = {
+                "count": 1,
+                "last_used": datetime.now().isoformat()
+            }
+        
+        # Record content hash
+        content_hash = hashlib.md5(content.encode('utf-8')).hexdigest()
+        if content_hash not in self.post_history["content_hashes"]:
+            self.post_history["content_hashes"].append(content_hash)
+            if len(self.post_history["content_hashes"]) > 100:
+                self.post_history["content_hashes"] = self.post_history["content_hashes"][-100:]
+        
+        # Record key points for this topic
+        key_points = self._extract_key_points(content)
+        if key_points:
+            if topic not in self.post_history["topic_content"]:
+                self.post_history["topic_content"][topic] = []
+            self.post_history["topic_content"][topic].append(key_points)
+            # Keep only last 10 sets of key points per topic
+            if len(self.post_history["topic_content"][topic]) > 10:
+                self.post_history["topic_content"][topic] = self.post_history["topic_content"][topic][-10:]
+        
+        # Store detailed post information
+        post_summary = {
+            "topic": topic,
+            "timestamp": datetime.now().isoformat(),
+            "content_hash": content_hash,
+            "key_points": key_points,
+            "excerpt": content[:100] + "..." if len(content) > 100 else content
+        }
+        
+        self.post_history["detailed_posts"].append(post_summary)
+        if len(self.post_history["detailed_posts"]) > 30:
+            self.post_history["detailed_posts"] = self.post_history["detailed_posts"][-30:]
+        
+        self._save_history()
+    
+    def is_content_duplicate(self, content: str) -> bool:
+        """Check if content is too similar to previous posts."""
+        content_hash = hashlib.md5(content.encode('utf-8')).hexdigest()
+        return content_hash in self.post_history["content_hashes"]
+    
+    def get_least_used_topics(self, topics: List[str], count: int = 10) -> List[str]:
+        """Get topics that have been used least frequently."""
+        topic_usage = []
+        for topic in topics:
+            if topic in self.post_history["topics"]:
+                topic_usage.append((topic, self.post_history["topics"][topic]["count"]))
+            else:
+                topic_usage.append((topic, 0))
+        
+        topic_usage.sort(key=lambda x: x[1])
+        return [t[0] for t in topic_usage[:count]]
 
 class GeminiAI:
     """Class to interact with Google's Gemini API."""
@@ -27,6 +177,9 @@ class GeminiAI:
         """Generate content using Gemini AI."""
         try:
             url = f"{self.api_url}?key={self.api_key}"
+            
+            # Add explicit instruction to avoid introductory phrases
+            prompt = "IMPORTANT: Do NOT include any introductory phrases like 'Here's', 'Here is', 'This is', etc. Start directly with the content.\n\n" + prompt
             
             payload = {
                 "contents": [{
@@ -62,6 +215,9 @@ class GeminiAI:
                         # If no closing ```, just remove the opening markers
                         content = content.replace("```html", "", 1).replace("```", "", 1).strip()
                 
+                # Remove common introductory phrases
+                content = self._remove_introductory_phrases(content)
+                
                 return content
             else:
                 logger.error(f"Error generating content: {response_data}")
@@ -70,7 +226,38 @@ class GeminiAI:
         except Exception as e:
             logger.error(f"Error calling Gemini API: {e}")
             return ""
-    
+
+    def _remove_introductory_phrases(self, content: str) -> str:
+        """Remove common introductory phrases from the content."""
+        introductory_phrases = [
+            "Here's a Telegram lesson draft following your specifications:",
+            "Here's a lesson draft:",
+            "Here's the content:",
+            "Here's a draft:",
+            "Here's a Telegram post:",
+            "Here is",
+            "Here's",
+            "This is",
+            "I've created",
+            "I have created",
+            "Let me present",
+            "Following your specifications:",
+            "As requested:",
+            "Draft:",
+        ]
+        
+        # Remove phrases from the beginning of the content
+        content = content.strip()
+        lower_content = content.lower()
+        
+        for phrase in introductory_phrases:
+            if lower_content.startswith(phrase.lower()):
+                content = content[len(phrase):].strip()
+                # Remove any leftover colons or newlines at the start
+                content = content.lstrip(':\n').strip()
+                
+        return content
+
     def generate_daily_post(self, topic: str = None) -> Dict[str, str]:
         """Generate a complete daily post with title and content."""
         current_date = datetime.now().strftime("%B %d, %Y")
@@ -326,52 +513,102 @@ class AutomatedChannelManager:
         """Initialize with required API tokens and channel ID."""
         self.telegram = TelegramChannelAdmin(telegram_token, telegram_channel_id)
         self.gemini = GeminiAI(gemini_api_key)
+        self.memory = PostMemory()
+        self.is_posting = False  # Lock to prevent multiple simultaneous posts
         logger.info("Automated Channel Manager initialized")
         
     def post_daily_update(self, topic: str = None):
         """Generate and post a daily update using Gemini AI."""
-        logger.info(f"Generating daily post{f' on {topic}' if topic else ''}")
-        
+        if self.is_posting:
+            logger.warning("Already generating a post, skipping this request")
+            return False
+            
         try:
+            self.is_posting = True
+            logger.info(f"Generating daily post{f' on {topic}' if topic else ''}")
+            
             # Generate content
             post_data = self.gemini.generate_daily_post(topic)
             
             if not post_data or not post_data.get("content"):
                 logger.error("Failed to generate content from Gemini API")
                 return False
-                
+            
+            # Check if content is duplicate
+            if self.memory.is_content_duplicate(post_data["content"]):
+                logger.warning("Generated duplicate content, skipping post")
+                return False
+            
             # Send to channel
             result = self.telegram.send_text_message(post_data["content"])
             
             if result and result.get('message_id'):
                 logger.info(f"Daily post sent successfully: {post_data['title']}")
+                
+                # Record in memory
+                self.memory.record_post(topic, post_data["content"])
                 return True
             else:
                 logger.error("Failed to send daily post")
                 return False
+                
         except Exception as e:
             logger.error(f"Error in post_daily_update: {e}")
             return False
-
+        finally:
+            self.is_posting = False
+            
     def schedule_daily_posts(self, time_str: str = None, topics: List[str] = None):
         """Schedule posts at specified frequency with topic rotation."""
+        # Clear any existing scheduled jobs
+        schedule.clear()
+        
         if topics:
-            # Set up rotation through the provided topics
-            topic_index = 0
+            # Set up rotation through the provided topics, prioritizing least used ones
+            def post_with_smart_topic_selection():
+                if self.is_posting:
+                    logger.warning("Post generation already in progress, skipping")
+                    return
+                    
+                try:
+                    # Get the 5 least used topics
+                    least_used = self.memory.get_least_used_topics(topics, 5)
+                    if least_used:
+                        # Choose randomly from the least used topics
+                        selected_topic = random.choice(least_used)
+                        logger.info(f"Selected topic '{selected_topic}' from least used topics")
+                        logger.info(f"Least used topics in queue: {', '.join(least_used)}")
+                        
+                        # Log topic history
+                        recent_posts = self.memory.get_recent_posts(5)
+                        if recent_posts:
+                            logger.info("Recent post history:")
+                            for post in recent_posts:
+                                logger.info(f"- {post['topic']} (posted at {post['timestamp']})")
+                        
+                        return self.post_daily_update(selected_topic)
+                    else:
+                        # Fallback to random selection if history is empty
+                        selected_topic = random.choice(topics)
+                        logger.info(f"No history found, randomly selected topic: {selected_topic}")
+                        return self.post_daily_update(selected_topic)
+                except Exception as e:
+                    logger.error(f"Error in post generation: {e}")
+                    return False
             
-            def post_with_rotating_topic():
-                nonlocal topic_index
-                current_topic = topics[topic_index]
-                self.post_daily_update(current_topic)
-                topic_index = (topic_index + 1) % len(topics)
-            
-            # Post every 4 hours
-            schedule.every(4).hours.do(post_with_rotating_topic)
-            logger.info(f"Scheduled posts every 4 hours with rotating topics")
+            # Post every 6 hours
+            schedule.every(6).hours.do(post_with_smart_topic_selection)
+            logger.info("Post scheduling details:")
+            logger.info(f"- Frequency: Every 6 hours")
+            logger.info(f"- Total available topics: {len(topics)}")
+            logger.info(f"- Topics in rotation: {', '.join(topics)}")
+            logger.info("- Selection method: Smart rotation (prioritizing least used topics)")
         else:
-            # Random topics every 4 hours
-            schedule.every(4).hours.do(self.post_daily_update)
-            logger.info(f"Scheduled posts every 4 hours with random topics")
+            # Random topics every 6 hours
+            schedule.every(6).hours.do(self.post_daily_update)
+            logger.info("Post scheduling details:")
+            logger.info("- Frequency: Every 6 hours")
+            logger.info("- Selection method: Random topics")
     
     def run_scheduler(self):
         """Run the scheduler loop."""
